@@ -30,7 +30,7 @@ def consumer_factory(bootstrap: str, topic: str, group_id: str, offset_mode: str
         bootstrap_servers=[bootstrap],
         group_id=group_id,
         enable_auto_commit=True,
-        auto_offset_reset=offset_mode,  # "latest" or "earliest"
+        auto_offset_reset=offset_mode,
         value_deserializer=lambda m: json.loads(m.decode("utf-8")),
         key_deserializer=lambda k: k.decode("utf-8") if k else None,
         consumer_timeout_ms=250,
@@ -39,24 +39,30 @@ def consumer_factory(bootstrap: str, topic: str, group_id: str, offset_mode: str
 
 st.set_page_config(layout="wide", page_title="Wildfire Twin (Live)")
 
-st.title("🔥 Wildfire-Twin — Live Stream Dashboard")
-st.caption("Kafka → Streamlit (Phase 0). Spark/Sedona spatial join comes in Phase 1.")
+# Load frontend styles if present (dashboard/frontend/styles.css)
+_frontend_css = os.path.join(os.path.dirname(__file__), "..", "frontend", "styles.css")
+if os.path.isfile(_frontend_css):
+    with open(_frontend_css, encoding="utf-8") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
-with st.sidebar:
-    st.header("Kafka Settings")
-    bootstrap = st.text_input("Bootstrap server", value=DEFAULT_BOOTSTRAP)
-    topic = st.text_input("Topic", value=DEFAULT_TOPIC)
+st.title("Wildfire-Twin — Live Stream Dashboard")
+st.caption("Kafka to Streamlit (Phase 0). Spark/Sedona spatial join in Phase 1.")
 
-    st.header("Display Controls")
-    refresh_sec = st.slider("Refresh interval (sec)", 0.2, 5.0, 1.0, 0.1)
-    max_points = st.slider("Max points to keep", 100, 5000, 800, 100)
-    window_min = st.slider("Time window (minutes)", 1, 60, 10)
-    temp_threshold = st.slider("Temperature threshold (°C)", 0.0, 120.0, 50.0, 1.0)
-
-    offset_mode = st.selectbox("Start offset", ["latest", "earliest"], index=0)
-    show_all = st.checkbox("Show all buffered events (ignore time window)", value=False)
-
-    st.header("Map Style")
+with st.expander("Connection and display settings", expanded=False):
+    r1, r2 = st.columns(2)
+    with r1:
+        st.subheader("Kafka")
+        bootstrap = st.text_input("Bootstrap server", value=DEFAULT_BOOTSTRAP)
+        topic = st.text_input("Topic", value=DEFAULT_TOPIC)
+    with r2:
+        st.subheader("Display")
+        refresh_sec = st.slider("Refresh interval (sec)", 0.2, 5.0, 1.0, 0.1)
+        max_points = st.slider("Max points to keep", 100, 5000, 800, 100)
+        window_min = st.slider("Time window (minutes)", 1, 60, 10)
+        temp_threshold = st.slider("Temperature threshold (C)", 0.0, 120.0, 50.0, 1.0)
+        offset_mode = st.selectbox("Start offset", ["latest", "earliest"], index=0)
+        show_all = st.checkbox("Show all buffered events (ignore time window)", value=False)
+    st.subheader("Map")
     map_style_options = {
         "Simple (No Token)": "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         "OpenStreetMap (Voyager)": "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
@@ -66,7 +72,6 @@ with st.sidebar:
     mapbox_api_key = st.text_input("Mapbox token (optional)", type="password")
 
 
-# Session state
 if "events" not in st.session_state:
     st.session_state.events = []
 
@@ -77,7 +82,6 @@ if "consumer" not in st.session_state:
     st.session_state.consumer_offset_mode = None
 
 
-# Recreate consumer if bootstrap/topic/offset_mode changes
 need_new_consumer = (
     st.session_state.consumer is None
     or st.session_state.consumer_bootstrap != bootstrap
@@ -92,7 +96,7 @@ if need_new_consumer:
         st.session_state.consumer_bootstrap = bootstrap
         st.session_state.consumer_topic = topic
         st.session_state.consumer_offset_mode = offset_mode
-        st.toast(f"Connected: {bootstrap} / topic={topic} / offset={offset_mode}", icon="✅")
+        st.toast(f"Connected: {bootstrap} / topic={topic} / offset={offset_mode}", icon=None)
     except Exception as e:
         st.session_state.consumer = None
         st.error(f"Failed to connect to Kafka at {bootstrap} (topic={topic}).\n\n{e}")
@@ -101,7 +105,6 @@ if need_new_consumer:
 def poll_kafka(consumer, max_messages=500, timeout_ms=200):
     if consumer is None:
         return []
-
     out = []
     try:
         records = consumer.poll(timeout_ms=timeout_ms, max_records=max_messages)
@@ -115,7 +118,6 @@ def poll_kafka(consumer, max_messages=500, timeout_ms=200):
     return out
 
 
-
 new = poll_kafka(st.session_state.consumer, max_messages=500)
 if new:
     st.session_state.events.extend(new)
@@ -123,13 +125,10 @@ if new:
 with st.expander("Debug (raw stream)", expanded=False):
     st.write("Buffered events:", len(st.session_state.events))
     if len(st.session_state.events) > 0:
-        st.json(st.session_state.events[-1])  # last raw event
+        st.json(st.session_state.events[-1])
 
-
-# rolling buffer
 if len(st.session_state.events) > max_points:
     st.session_state.events = st.session_state.events[-max_points:]
-
 
 df = pd.DataFrame(st.session_state.events)
 
@@ -137,40 +136,30 @@ if not df.empty:
     for col in ["latitude", "longitude", "temperature"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
     if "event_time" in df.columns:
         df["event_time_parsed"] = df["event_time"].apply(parse_event_time)
     else:
         df["event_time_parsed"] = pd.NaT
-
     df = df.dropna(subset=["latitude", "longitude"])
-
     if not show_all:
         now_utc = datetime.now(timezone.utc)
         cutoff = now_utc - timedelta(minutes=window_min)
         df = df[df["event_time_parsed"].notna()]
         df = df[df["event_time_parsed"] >= cutoff]
-
     if "is_fire" not in df.columns:
         df["is_fire"] = df.get("temperature", 0) >= temp_threshold
 else:
     df = pd.DataFrame(columns=["event_time", "sensor_id", "latitude", "longitude", "temperature", "is_fire"])
     df["event_time_parsed"] = pd.NaT
 
-
-# Metrics
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Buffered events", len(st.session_state.events))
 c2.metric(f"Events (last {window_min}m)", len(df))
 c3.metric("Fire events", int(df["is_fire"].sum()) if "is_fire" in df.columns and not df.empty else 0)
-c4.metric("Max temp (°C)", float(df["temperature"].max()) if "temperature" in df.columns and not df.empty else 0.0)
+c4.metric("Max temp (C)", float(df["temperature"].max()) if "temperature" in df.columns and not df.empty else 0.0)
 
-
-# Map
 st.subheader("Live Map")
-
 center_lat, center_lon = 33.98, -117.37
-
 view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=11, pitch=45)
 
 
@@ -203,9 +192,7 @@ layer_points = pdk.Layer(
     pickable=True,
     auto_highlight=True,
 )
-
-tooltip = {"text": "sensor: {sensor_id}\nT: {temperature}°C\nfire: {is_fire}\ntime: {event_time}"}
-
+tooltip = {"text": "sensor: {sensor_id}\nT: {temperature}C\nfire: {is_fire}\ntime: {event_time}"}
 deck = pdk.Deck(
     layers=[layer_points],
     initial_view_state=view_state,
@@ -213,15 +200,11 @@ deck = pdk.Deck(
     tooltip=tooltip,
     api_keys={"mapbox": mapbox_api_key} if mapbox_api_key else None,
 )
+st.pydeck_chart(deck, use_container_width=True)
 
-st.pydeck_chart(deck, width="stretch")
-
-
-# Table
 st.subheader("Latest Events")
-
 df_view = df.sort_values("event_time_parsed", ascending=False).drop(columns=["event_time_parsed"], errors="ignore")
-st.dataframe(df_view.head(200), width="stretch")
+st.dataframe(df_view.head(200), use_container_width=True)
 
 time.sleep(refresh_sec)
 st.rerun()

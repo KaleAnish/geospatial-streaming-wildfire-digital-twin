@@ -1,0 +1,239 @@
+/* Frontend styles: edit this file to redesign the dashboard (layout, hover, responsive). */
+
+/* Hide sidebar so main content uses full width */
+[data-testid="stSidebar"] {
+  display: none !important;
+}
+
+section[data-testid="stSidebar"] + section.main,
+div[data-testid="stAppViewContainer"] > section.main {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+/* Smooth transitions for interactive elements */
+.stButton > button,
+[data-testid="stMetric"],
+[data-testid="stExpander"],
+[data-testid="stDeckGlJsonChart"],
+[data-testid="stDataFrame"],
+.stTextInput > div > div > input,
+.stSelectbox > div,
+.stSlider > div,
+[data-testid="stExpander"] details summary {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease,
+              transform 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stButton > button,
+  [data-testid="stMetric"],
+  [data-testid="stExpander"],
+  [data-testid="stDeckGlJsonChart"],
+  [data-testid="stDataFrame"],
+  .stTextInput > div > div > input,
+  .stSelectbox > div,
+  .stSlider > div,
+  [data-testid="stExpander"] details summary {
+    transition: none;
+  }
+}
+
+/* Main content: centered, responsive */
+.main .block-container {
+  max-width: 960px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-top: 2rem;
+  padding-bottom: 3rem;
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .main .block-container {
+    max-width: 100%;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    padding-top: 1.25rem;
+    padding-bottom: 2rem;
+  }
+}
+
+@media (min-width: 1200px) {
+  .main .block-container {
+    max-width: 1120px;
+  }
+}
+
+/* Headings */
+h1, h2, h3 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 0;
+}
+
+h1 { margin-bottom: 0.25rem; }
+h2 { margin-bottom: 0.75rem; margin-top: 1.5rem; }
+h3 { margin-bottom: 0.5rem; }
+
+p.caption {
+  margin-top: 0;
+  margin-bottom: 1.5rem;
+  opacity: 0.85;
+}
+
+/* Settings expander: hover state */
+[data-testid="stExpander"] {
+  border-radius: 0.5rem;
+  border: 1px solid rgba(212, 165, 116, 0.2);
+  margin-bottom: 1.5rem;
+}
+
+[data-testid="stExpander"]:hover {
+  border-color: rgba(212, 165, 116, 0.35);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+[data-testid="stExpander"] details summary {
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.25rem 0;
+}
+
+[data-testid="stExpander"] details summary:hover {
+  color: #D4A574;
+}
+
+/* Metric cards: hover lift and glow */
+[data-testid="stMetric"] {
+  padding: 1rem 1.25rem;
+  border-radius: 0.5rem;
+  background-color: rgba(41, 37, 36, 0.6);
+  border: 1px solid rgba(212, 165, 116, 0.15);
+}
+
+[data-testid="stMetric"]:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(212, 165, 116, 0.12);
+  border-color: rgba(212, 165, 116, 0.3);
+  background-color: rgba(41, 37, 36, 0.85);
+}
+
+[data-testid="column"] {
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+
+@media (max-width: 640px) {
+  [data-testid="column"] {
+    padding-left: 0;
+    padding-right: 0;
+    margin-bottom: 0.75rem;
+  }
+
+  [data-testid="stMetric"]:hover {
+    transform: none;
+  }
+}
+
+/* Map container: hover border emphasis */
+[data-testid="stDeckGlJsonChart"] {
+  border-radius: 0.5rem;
+  overflow: hidden;
+  min-height: 420px;
+  width: 100%;
+  border: 1px solid transparent;
+}
+
+[data-testid="stDeckGlJsonChart"]:hover {
+  border-color: rgba(212, 165, 116, 0.25);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+}
+
+@media (max-width: 768px) {
+  [data-testid="stDeckGlJsonChart"] {
+    min-height: 320px;
+  }
+}
+
+/* Dataframe: subtle hover */
+[data-testid="stDataFrame"] {
+  border-radius: 0.5rem;
+  overflow: hidden;
+  border: 1px solid transparent;
+}
+
+[data-testid="stDataFrame"]:hover {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+}
+
+/* Buttons: hover and focus */
+.stButton > button {
+  border-radius: 0.5rem;
+  font-weight: 500;
+}
+
+.stButton > button:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(212, 165, 116, 0.25);
+}
+
+.stButton > button:active {
+  transform: translateY(0);
+}
+
+.stButton > button:focus-visible {
+  outline: 2px solid #D4A574;
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .stButton > button:hover {
+    transform: none;
+  }
+}
+
+/* Text inputs: hover and focus */
+.stTextInput > div > div > input {
+  border-radius: 0.5rem;
+}
+
+.stTextInput > div > div > input:hover {
+  border-color: rgba(212, 165, 116, 0.5);
+  box-shadow: 0 0 0 1px rgba(212, 165, 116, 0.2);
+}
+
+.stTextInput > div > div > input:focus {
+  border-color: #D4A574;
+  box-shadow: 0 0 0 2px rgba(212, 165, 116, 0.3);
+}
+
+/* Selectbox: hover */
+.stSelectbox > div {
+  border-radius: 0.5rem;
+}
+
+.stSelectbox > div:hover {
+  border-color: rgba(212, 165, 116, 0.4);
+}
+
+/* Slider: hover track */
+.stSlider > div:hover {
+  opacity: 1;
+}
+
+/* Checkbox: hover label area */
+.stCheckbox label:hover {
+  color: #D4A574;
+}
+
+/* Links */
+a {
+  transition: color 0.2s ease, opacity 0.2s ease;
+}
+
+a:hover {
+  opacity: 0.9;
+}

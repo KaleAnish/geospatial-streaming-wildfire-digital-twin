@@ -38,7 +38,12 @@ wild-fire-twin/
   producer/
     data_generator.py    # Kafka producer (wildfire sensor simulator)
   dashboard/
-    app.py               # Streamlit app (prototype UI)
+    backend/
+      app.py             # Streamlit app (logic only; loads frontend styles)
+    frontend/            # Design layer: edit to change look (no backend changes)
+      .streamlit/        #   Theme (config.toml)
+      styles.css         #   Layout, hover, responsive
+    run.ps1, run.sh      #   Run dashboard (use these to start the app)
   docs/
     PROJECT_STATE.md     # Project state + schema contract
   requirements.txt
@@ -108,9 +113,19 @@ Expected behavior:
 ---
 
 ### 5) Run the dashboard (Streamlit)
+From repo root:
 ```bash
-streamlit run dashboard/app.py
+# Windows
+.\dashboard\run.ps1
+
+# Mac/Linux
+./dashboard/run.sh
 ```
+This uses the frontend theme and styles (centered layout, no sidebar, warm dark theme).
+
+**Customizing the dashboard (frontend):** Edit these files to change how the dashboard looks; no backend code changes needed.
+- **dashboard/frontend/styles.css** — Layout, spacing, hover effects, responsive breakpoints. The app injects this when it runs. Refresh the dashboard in your browser to see CSS changes.
+- **dashboard/frontend/.streamlit/config.toml** — Theme (colors, fonts, borders). Restart the app to see config/theme changes.
 
 Expected behavior:
 - Streamlit starts locally
