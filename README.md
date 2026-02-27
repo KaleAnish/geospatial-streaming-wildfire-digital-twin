@@ -3,6 +3,8 @@
 A real-time “digital twin” prototype for wildfire monitoring.  
 It simulates high-velocity IoT sensor events (fire/temperature points) and streams them through Kafka, with the goal of detecting fire events in real time and (next phase) performing spatial joins against static infrastructure data (e.g., building footprints) to identify structures at risk.
 
+This project is being implemented by Prince Savsaviya, Viswanadh Rahul Challa, Anish A. Kale and Ali Rezayi Nejad at UC Riverside
+
 ---
 
 ## What’s implemented right now (Phase 0)
