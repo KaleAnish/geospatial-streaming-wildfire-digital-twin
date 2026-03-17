@@ -146,3 +146,6 @@ dmypy.json
 
 # Streamlit
 .streamlit/
+
+# Local Hadoop/Winutils binaries
+infra/hadoop/
