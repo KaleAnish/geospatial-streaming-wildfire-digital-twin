@@ -45,9 +45,17 @@ if ($javaVersionOutput -notmatch '"(1\.8|11)\.' ) {
     Start-Sleep -Seconds 5
 }
 
-# --- Ensure PYSPARK uses the right Python ---
-$env:PYSPARK_PYTHON = (Get-Command python).Source
-$env:PYSPARK_DRIVER_PYTHON = $env:PYSPARK_PYTHON
+# --- Python Setup ---
+$venvPython = Join-Path $PSScriptRoot "..\wildfire\Scripts\python.exe"
+if (Test-Path $venvPython) {
+    $env:PYTHON_EXECUTABLE = $venvPython
+} else {
+    $env:PYTHON_EXECUTABLE = (Get-Command python).Source
+}
+$env:PYSPARK_PYTHON = $env:PYTHON_EXECUTABLE
+$env:PYSPARK_DRIVER_PYTHON = $env:PYTHON_EXECUTABLE
+
+Write-Host "Detected Python : $env:PYTHON_EXECUTABLE" -ForegroundColor Cyan
 
 Write-Host ""
 Write-Host "=== Launching Wildfire-Twin Spatial Engine ===" -ForegroundColor Green

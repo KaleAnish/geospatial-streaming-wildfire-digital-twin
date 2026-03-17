@@ -53,19 +53,20 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
     
     # 1. Load static building data
-    try:
-        if BUILDING_DATA_PATH.endswith('.parquet'):
-            buildings_df = spark.read.format("geoparquet").load(BUILDING_DATA_PATH)
-        else:
-            # Fallback to GeoJSON reading
-            buildings_df = spark.read.format("geojson").load(BUILDING_DATA_PATH)
-        
+    print("\n[STEP 1] Loading Static Building Assets...")
+    buildings_path = os.path.join(os.getcwd(), "data", "riverside_buildings.parquet")
+    
+    if os.path.exists(buildings_path):
+        print(f"Loading CA buildings from: {buildings_path}")
+        buildings_df = spark.read.format("geoparquet").load(buildings_path)
         buildings_df.createOrReplaceTempView("buildings")
-        print(f"Loaded building data from {BUILDING_DATA_PATH}")
-    except Exception as e:
-        print(f"Warning: Could not load building data. Will create a dummy view for testing. \nError: {e}")
-        # Create a dummy table if data is missing just for the pipeline to start
-        spark.sql("SELECT ST_GeomFromText('POLYGON((-117.4 34.0, -117.3 34.0, -117.3 33.9, -117.4 33.9, -117.4 34.0))') as geometry, 'dummy_001' as building_id").createOrReplaceTempView("buildings")
+        print(f"✅ Loaded {buildings_df.count()} buildings into 'buildings' view.")
+    else:
+        print(f"⚠️ Warning: {buildings_path} not found. Using fallback dummy data.")
+        dummy_data = [("dummy_id", "POLYGON ((-117.4 33.9, -117.3 33.9, -117.3 34.0, -117.4 34.0, -117.4 33.9))")]
+        dummy_df = spark.createDataFrame(dummy_data, ["id", "wkt"])
+        dummy_df.createOrReplaceTempView("raw_buildings")
+        spark.sql("CREATE OR REPLACE TEMP VIEW buildings AS SELECT id, ST_GeomFromText(wkt) as geometry FROM raw_buildings")
 
     # 2. Define schema for incoming Kafka events
     event_schema = StructType([
