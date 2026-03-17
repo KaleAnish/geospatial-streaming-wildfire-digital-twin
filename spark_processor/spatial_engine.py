@@ -16,7 +16,8 @@ if sys.version_info >= (3, 13) and not hasattr(typing, 'io'):
     sys.modules['typing.io'] = mock_io
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, struct, to_json, expr
+from pyspark.sql.functions import col, from_json, struct, to_json, expr, udf
+import math
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, BooleanType
 
 from sedona.spark import SedonaContext
@@ -128,6 +129,37 @@ def main():
         .selectExpr("CAST(value AS STRING) as json_payload") \
         .select(from_json(col("json_payload"), event_schema).alias("data")) \
         .select("data.*")
+        
+    @udf(returnType=StringType())
+    def calculate_wind_cone_wkt(lat: float, lon: float, wind_mph: float, wind_deg: float) -> str:
+        if lat is None or lon is None:
+            return None
+        wind_mph = wind_mph or 0.0
+        wind_deg = wind_deg or 0.0
+        
+        BASE_RADIUS_METERS = 500
+        EARTH_RADIUS = 6378137
+        
+        length_meters = BASE_RADIUS_METERS * (1.0 + (wind_mph * 0.1))
+        travel_deg = (wind_deg + 180) % 360
+        travel_rad = math.radians(travel_deg)
+        angle_offset = math.radians(30)
+        
+        left_rad = travel_rad - angle_offset
+        right_rad = travel_rad + angle_offset
+
+        left_lat = lat + (length_meters / EARTH_RADIUS) * math.cos(left_rad) * (180 / math.pi)
+        left_lon = lon + (length_meters / EARTH_RADIUS) * math.sin(left_rad) * (180 / math.pi) / math.cos(math.radians(lat))
+
+        right_lat = lat + (length_meters / EARTH_RADIUS) * math.cos(right_rad) * (180 / math.pi)
+        right_lon = lon + (length_meters / EARTH_RADIUS) * math.sin(right_rad) * (180 / math.pi) / math.cos(math.radians(lat))
+        
+        return f"POLYGON (({lon} {lat}, {right_lon} {right_lat}, {left_lon} {left_lat}, {lon} {lat}))"
+
+    parsed_stream = parsed_stream.withColumn(
+        "wind_cone_wkt",
+        calculate_wind_cone_wkt(col("latitude"), col("longitude"), col("wind_speed_mph"), col("wind_direction_deg"))
+    )
     
     parsed_stream.createOrReplaceTempView("fire_events_stream")
 
@@ -150,12 +182,9 @@ def main():
             ST_AsText(b.geometry) as building_geom
         FROM fire_events_stream f
         JOIN buildings b
-        ON ST_Intersects(
-            ST_Buffer(ST_Point(CAST(f.longitude AS Decimal(24,20)), CAST(f.latitude AS Decimal(24,20))), {base_buffer}), 
-            b.geometry
-        )
+        ON ST_Intersects(ST_GeomFromWKT(f.wind_cone_wkt), b.geometry)
         WHERE f.is_fire = true
-    """.format(base_buffer=BASE_RISK_DEGREES)
+    """
 
     risk_assets_stream = spark.sql(risk_query)
 

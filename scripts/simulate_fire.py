@@ -69,7 +69,7 @@ def main():
         
         event = {
             "event_time": utc_now_iso(),
-            "event_id": str(uuid.uuid4()),
+            "event_id": f"sim_{uuid.uuid4()}",
             "sensor_id": f"sim_sensor_{i}",
             "latitude": float(event_lat),
             "longitude": float(event_lon),

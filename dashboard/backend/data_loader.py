@@ -66,14 +66,14 @@ def load_and_classify_buildings() -> gpd.GeoDataFrame:
     return gdf
 
 
-def load_alerts(limit: int = 500) -> list[dict]:
+def load_alerts(limit: int = 500, source: str = "all") -> list[dict]:
     """Load latest alerts from DuckDB live store."""
-    return get_latest_alerts(limit=limit)
+    return get_latest_alerts(limit=limit, source=source)
 
 
-def load_alert_count() -> int:
+def load_alert_count(source: str = "all") -> int:
     """Quick count of alerts in the live store."""
-    return get_alert_count()
+    return get_alert_count(source=source)
 
 
 def filter_to_viewport(gdf: gpd.GeoDataFrame, center_lat: float, center_lon: float,

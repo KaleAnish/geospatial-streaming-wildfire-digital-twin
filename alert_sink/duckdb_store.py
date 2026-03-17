@@ -120,12 +120,19 @@ def insert_alerts_batch(alerts: list[dict]):
     con.close()
 
 
-def get_latest_alerts(limit: int = 500) -> list[dict]:
-    """Return the most recent alerts from the live table."""
+def get_latest_alerts(limit: int = 500, source: str = "all") -> list[dict]:
+    """Return the most recent alerts from the live table, optionally filtered by source (all/live/sim)."""
     con = _get_connection(read_only=True)
     try:
-        result = con.execute("""
+        where_clause = ""
+        if source == "sim":
+            where_clause = "WHERE event_id LIKE 'sim_%' OR event_id LIKE 'stress_test_%'"
+        elif source == "live":
+            where_clause = "WHERE event_id NOT LIKE 'sim_%' AND event_id NOT LIKE 'stress_test_%'"
+            
+        result = con.execute(f"""
             SELECT * FROM alerts_live
+            {where_clause}
             ORDER BY event_time DESC
             LIMIT ?
         """, [limit]).fetchdf()
@@ -136,24 +143,37 @@ def get_latest_alerts(limit: int = 500) -> list[dict]:
         con.close()
         return []
 
-
-def get_alert_count() -> int:
+def get_alert_count(source: str = "all") -> int:
     """Return total number of alerts in the live table."""
     con = _get_connection(read_only=True)
     try:
-        count = con.execute("SELECT COUNT(*) FROM alerts_live").fetchone()[0]
+        where_clause = ""
+        if source == "sim":
+            where_clause = "WHERE event_id LIKE 'sim_%' OR event_id LIKE 'stress_test_%'"
+        elif source == "live":
+            where_clause = "WHERE event_id NOT LIKE 'sim_%' AND event_id NOT LIKE 'stress_test_%'"
+            
+        count = con.execute(f"SELECT COUNT(*) FROM alerts_live {where_clause}").fetchone()[0]
         con.close()
         return count
     except duckdb.CatalogException:
         con.close()
         return 0
 
-
 def clear_alerts():
     """Delete all alerts from the live table. Useful for testing."""
     con = _get_connection()
     try:
         con.execute("DELETE FROM alerts_live")
+    except duckdb.CatalogException:
+        pass
+    con.close()
+
+def delete_simulations():
+    """Delete all simulated/stress-test alerts from the live table."""
+    con = _get_connection()
+    try:
+        con.execute("DELETE FROM alerts_live WHERE event_id LIKE 'sim_%' OR event_id LIKE 'stress_test_%'")
     except duckdb.CatalogException:
         pass
     con.close()

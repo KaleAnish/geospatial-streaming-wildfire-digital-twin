@@ -34,6 +34,7 @@ from dashboard.backend.map_layers import (
     apply_alert_highlighting,
 )
 from scripts.fetch_weather_data import fetch_live_weather
+from alert_sink.duckdb_store import delete_simulations
 
 # --- Kafka Simulation Logic ---
 def trigger_simulation(lat: float, lon: float, temp: float):
@@ -56,7 +57,7 @@ def trigger_simulation(lat: float, lon: float, temp: float):
         
     event = {
         "event_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "event_id": str(uuid.uuid4()),
+        "event_id": f"sim_{uuid.uuid4()}",
         "sensor_id": "dashboard_sim",
         "latitude": lat,
         "longitude": lon,
@@ -81,6 +82,7 @@ check_data_exists()
 
 # --- City Coordinate Registry ---
 CITIES = {
+    "🌐 California (Whole State)": (36.7783, -119.4179),
     "Riverside": (33.9533, -117.3961),
     "Los Angeles": (34.0522, -118.2437),
     "San Francisco": (37.7749, -122.4194),
@@ -92,8 +94,25 @@ CITIES = {
 # --- Sidebar: Navigation & Live Alerts ---
 with st.sidebar:
     st.header("Navigation")
+    
+    # 1. Data Source Filter
+    st.subheader("📡 Data Feed Focus")
+    data_source_display = st.radio(
+        "Isolate Dashboard Data:",
+        options=["All Activity (Live + Sim)", "Live Satellite Only (FIRMS)", "Simulated Tests Only"],
+        label_visibility="collapsed"
+    )
+    
+    # Map selection to internal source string
+    if data_source_display == "Live Satellite Only (FIRMS)":
+        st.session_state.data_source = "live"
+    elif data_source_display == "Simulated Tests Only":
+        st.session_state.data_source = "sim"
+    else:
+        st.session_state.data_source = "all"
+
     selected_city = st.selectbox(
-        "Teleport to City (Fixed Viewport)", list(CITIES.keys()), index=0
+        "🗺️ Teleport Viewport", list(CITIES.keys()), index=0
     )
 
     st.divider()
@@ -123,6 +142,10 @@ with st.sidebar:
                 trigger_simulation(sim_lat, sim_lon, sim_temp)
             st.success("Simulation triggered! Wait a few seconds for map update.")
 
+    if st.button("🗑️ Clear Previous Simulations", use_container_width=True):
+        delete_simulations()
+        st.toast("🧹 All simulated data wiped from DuckDB.")
+
     st.divider()
 
     # Live Alert Panel — auto-refreshes from DuckDB every 5 seconds
@@ -130,7 +153,9 @@ with st.sidebar:
     def live_alert_panel():
         st.header("⚡ Live Risk Alerts")
 
-        alerts = load_alerts(limit=100)
+        # Read source from session state for filtering
+        source = st.session_state.get('data_source', 'all')
+        alerts = load_alerts(limit=100, source=source)
         alert_count = len(alerts)
 
         if alerts:
@@ -160,19 +185,27 @@ with st.sidebar:
 
 # --- Load Buildings (Static) ---
 center_lat, center_lon = CITIES[selected_city]
-zoom_level = 14
+
+if "California" in selected_city:
+    zoom_level = 6
+else:
+    zoom_level = 13
 
 with st.spinner("Processing state-wide assets..."):
     full_gdf = load_and_classify_buildings()
 
-# Filter to viewport (Base static geometry)
-base_visible_gdf = filter_to_viewport(full_gdf, center_lat, center_lon)
+# Filter to viewport unless viewing whole state
+if "California" in selected_city:
+    base_visible_gdf = full_gdf
+else:
+    base_visible_gdf = filter_to_viewport(full_gdf, center_lat, center_lon)
 
 # --- Auto-Refreshing Map Fragment ---
 @st.fragment(run_every=5)
 def render_live_map():
     # Load fresh alerts
-    alerts = load_alerts(limit=500)
+    source = st.session_state.get('data_source', 'all')
+    alerts = load_alerts(limit=500, source=source)
     
     # Copy base GDF so we don't mutate the static cached layer, then highlight
     visible_gdf = apply_alert_highlighting(base_visible_gdf.copy(), alerts)
@@ -191,7 +224,7 @@ def render_live_map():
     )
     
     deck = pdk.Deck(
-        views=[pdk.View(type="MapView", controller=False)],
+        views=[pdk.View(type="MapView", controller=True)],  # Unlocked pan & zoom!
         layers=all_layers,
         initial_view_state=view_state,
         map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
@@ -224,6 +257,7 @@ def render_footer():
     with col3:
         st.subheader("System Health")
         st.metric("Total Master Buildings", f"{len(full_gdf):,}")
-        st.metric("Live Active Alerts", load_alert_count())
+        source = st.session_state.get('data_source', 'all')
+        st.metric("Live Active Alerts", load_alert_count(source=source))
 
 render_footer()
