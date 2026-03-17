@@ -36,6 +36,13 @@ CHECKPOINT_DIR = os.path.join(os.getcwd(), "data", "spark_checkpoints", f"fire_t
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
+# Propagate typing.io patch to Spark executor workers via sitecustomize.py
+# Python auto-loads sitecustomize.py from any directory on PYTHONPATH at startup
+spark_proc_dir = os.path.dirname(os.path.abspath(__file__))
+existing = os.environ.get("PYTHONPATH", "")
+if spark_proc_dir not in existing:
+    os.environ["PYTHONPATH"] = spark_proc_dir + os.pathsep + existing
+
 # --- Windows Environment Self-Healing ---
 # Spark on Windows requires HADOOP_HOME and winutils.exe. 
 # If not set, we try to point it to the project's infra/hadoop directory.
@@ -74,6 +81,7 @@ def create_spark_session():
                 "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1") \
         .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true") \
         .config("spark.driver.memory", "4g") \
+        .config("spark.executorEnv.PYTHONPATH", spark_proc_dir) \
         .getOrCreate()
     
     sedona = SedonaContext.create(config)
