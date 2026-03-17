@@ -88,6 +88,13 @@ with st.sidebar:
         if st.button("Clear Alerts"):
             st.session_state.alerts = []
             st.rerun()
+            
+        # Display weather context from the most recent alert
+        latest = st.session_state.alerts[-1]
+        st.info(f"**Live Weather Incident Context:**\n"
+               f"🌡️ {latest.get('temperature', '--')}°F\n"
+               f"💧 {latest.get('humidity_percent', '--')}%\n"
+               f"💨 {latest.get('wind_speed_mph', '--')} mph @ {latest.get('wind_direction_deg', '--')}°")
         
         for alert in st.session_state.alerts[-5:]: # Show last 5
             st.warning(f"**RISK**: {alert.get('building_name', 'Unnamed Facility')}\nType: {alert.get('building_type')}")
@@ -148,11 +155,67 @@ def apply_alert_color(row):
 if not visible_gdf.empty:
     visible_gdf['color'] = visible_gdf.apply(apply_alert_color, axis=1)
 
-# Prepare Fire Points from alerts
-fire_df = pd.DataFrame([
-    {"lat": a['fire_lat'], "lon": a['fire_lon'], "name": "Active Fire Target"}
-    for a in st.session_state.alerts
-])
+# Prepare Fire Points and Wind Cones from alerts
+# We recalculate the cone here for PyDeck rendering using turf.js equivalent logic or Polygon generation.
+# For PyDeck, we can render the polygon directly if we construct it, or use a Scatterplot for origin 
+# and a PolygonLayer for the cone. Let's create an approximate polygon for the cone.
+import math
+fire_geneses = []
+wind_cones = []
+
+BASE_RADIUS_METERS = 500
+
+for a in st.session_state.alerts:
+    # Origin
+    fire_geneses.append({"lat": a['fire_lat'], "lon": a['fire_lon'], "name": "Fire Origin"})
+    
+    # Calculate Cone Polygon
+    lat, lon = a['fire_lat'], a['fire_lon']
+    wind_mph = float(a.get('wind_speed_mph', 0))
+    wind_deg = float(a.get('wind_direction_deg', 0))
+    
+    # Length of cone depends on wind speed. 1 mph = 10% longer.
+    length_meters = BASE_RADIUS_METERS * (1.0 + (wind_mph * 0.1))
+    width_meters = BASE_RADIUS_METERS  # Keep width roughly the same as base diameter
+    
+    # Earth radius in meters
+    R = 6378137
+    
+    # Point 1: Origin (Tail of the cone)
+    # Point 2 & 3: The wide part of the cone pushed forward by wind
+    
+    # Convert wind direction to Radians. 
+    # Meteorological wind direction: 0=North, 90=East. This is where wind acts FROM.
+    # To find where fire goes TO, we add 180 degrees.
+    travel_deg = (wind_deg + 180) % 360
+    travel_rad = math.radians(travel_deg)
+    
+    # Calculate the tip/center of the far end of the cone
+    dest_lat = lat + (length_meters / R) * (180 / math.pi)
+    dest_lon = lon + (length_meters / R) * (180 / math.pi) / math.cos(lat * math.pi/180)
+    
+    # For a simple visual representation in PyDeck without complex Shapely buffering on the fly:
+    # We will use an arc/polygon. A simpler PyDeck approach is an ArcLayer or an oriented IconLayer, 
+    # but a manual triangle/cone is best.
+    
+    angle_offset = math.radians(30) # 30 degree spread on each side of the central wind vector
+    
+    left_rad = travel_rad - angle_offset
+    right_rad = travel_rad + angle_offset
+    
+    left_lat = lat + (length_meters / R) * math.cos(left_rad) * (180 / math.pi)
+    left_lon = lon + (length_meters / R) * math.sin(left_rad) * (180 / math.pi) / math.cos(lat * math.pi/180)
+    
+    right_lat = lat + (length_meters / R) * math.cos(right_rad) * (180 / math.pi)
+    right_lon = lon + (length_meters / R) * math.sin(right_rad) * (180 / math.pi) / math.cos(lat * math.pi/180)
+
+    wind_cones.append({
+        "polygon": [[lon, lat], [right_lon, right_lat], [left_lon, left_lat], [lon, lat]],
+        "color": [255, 140, 0, 120] # Translucent Dark Orange for the cone
+    })
+
+fire_df = pd.DataFrame(fire_geneses)
+cone_df = pd.DataFrame(wind_cones)
 
 # PyDeck
 view_state = pdk.ViewState(
@@ -177,14 +240,28 @@ layers = [
     )
 ]
 
+if not cone_df.empty:
+    layers.append(
+        pdk.Layer(
+            "PolygonLayer",
+            cone_df,
+            get_polygon="polygon",
+            get_fill_color="color",
+            get_line_color=[255, 69, 0, 255],
+            filled=True,
+            stroked=True,
+            line_width_min_pixels=2
+        )
+    )
+
 if not fire_df.empty:
     layers.append(
         pdk.Layer(
             "ScatterplotLayer",
             fire_df,
             get_position=["lon", "lat"],
-            get_color=[255, 0, 0, 160],
-            get_radius=500, # Shows the 500m radius
+            get_color=[255, 0, 0, 255], # Solid Bright Red for origin
+            get_radius=150, # Small tight radius for just the origin point
             pickable=True
         )
     )
@@ -211,7 +288,7 @@ with col2:
     st.markdown("🔴 **Medical** (Hospitals)")
     st.markdown("🟡 **Education** (Schools)")
     st.markdown("🟠 **Emergency** (Fire, Police)")
-    st.markdown("⭐ **ALERt** (Inside Fire Zone)")
+    st.markdown("⭐ **ALERt** (Inside Wind Cone)")
 with col3:
     st.subheader("System Health")
     st.metric("Total Master Buildings", f"{len(full_gdf):,}")

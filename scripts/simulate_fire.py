@@ -7,6 +7,8 @@ import argparse
 from datetime import datetime, timezone
 from kafka import KafkaProducer
 
+from fetch_weather_data import fetch_live_weather
+
 CITIES = {
     "Riverside": (33.9533, -117.3961),
     "Los Angeles": (34.0522, -118.2437),
@@ -40,6 +42,20 @@ def main():
     lat, lon = CITIES[args.city]
 
     print(f"Triggering {args.count} fire event(s) in {args.city} ({lat}, {lon})...")
+    
+    # Fetch live weather once for the general city coordinate
+    print("Fetching live weather data for simulation context...")
+    live_weather = fetch_live_weather(lat, lon)
+    if live_weather:
+        print(f"Weather context: {live_weather['temperature_f']}F, Wind: {live_weather['wind_speed_mph']}mph @ {live_weather['wind_direction_deg']}deg")
+    else:
+        print("Warning: Could not fetch weather. Using default zero-wind values fallback.")
+        live_weather = {
+            "temperature_f": args.temp,
+            "humidity_percent": 30.0,
+            "wind_speed_mph": 0.0,
+            "wind_direction_deg": 0.0
+        }
 
     for i in range(args.count):
         # Add tiny jitter to simulate different spots in the city
@@ -52,8 +68,12 @@ def main():
             "sensor_id": f"sim_sensor_{i}",
             "latitude": float(event_lat),
             "longitude": float(event_lon),
-            "temperature": float(args.temp),
-            "is_fire": True
+            "temperature": float(live_weather["temperature_f"]),
+            "is_fire": True,
+            # Weather Enrichment
+            "wind_speed_mph": float(live_weather["wind_speed_mph"]),
+            "wind_direction_deg": float(live_weather["wind_direction_deg"]),
+            "humidity_percent": float(live_weather["humidity_percent"])
         }
         
         producer.send(topic, value=event)

@@ -32,8 +32,8 @@ CHECKPOINT_DIR = os.path.join(os.getcwd(), "data", "spark_checkpoints", "fire_tw
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
-# Risk buffer in degrees (~500m)
-RISK_BUFFER_DEGREES = float(os.getenv("RISK_BUFFER_METERS", "500")) / 111000.0 
+# Base Risk buffer in degrees (~500m base)
+BASE_RISK_DEGREES = float(os.getenv("RISK_BUFFER_METERS", "500")) / 111000.0 
 
 def create_spark_session():
     # Configure Spark for Sedona and Kafka
@@ -67,7 +67,7 @@ def main():
         print(f"Critical Error: {BUILDING_DATA_PATH} not found.")
         sys.exit(1)
 
-    # 2. Define schema for incoming Kafka events
+    # 2. Define schema for incoming Kafka events (Enriched with Weather)
     event_schema = StructType([
         StructField("event_time", StringType(), True),
         StructField("event_id", StringType(), True),
@@ -75,7 +75,10 @@ def main():
         StructField("latitude", DoubleType(), True),
         StructField("longitude", DoubleType(), True),
         StructField("temperature", DoubleType(), True),
-        StructField("is_fire", BooleanType(), True)
+        StructField("is_fire", BooleanType(), True),
+        StructField("wind_speed_mph", DoubleType(), True),
+        StructField("wind_direction_deg", DoubleType(), True),
+        StructField("humidity_percent", DoubleType(), True)
     ])
 
     # 3. Read streaming data from Kafka
@@ -95,8 +98,10 @@ def main():
     
     parsed_stream.createOrReplaceTempView("fire_events_stream")
 
-    # 5. Spatial Join Processing
-    # We create a 500m buffer around fire events and find intersections with buildings.
+    # 5. Spatial Join Processing with Predictive Wind Modeling
+    # We create a base circle, scale it into an ellipse based on wind speed, 
+    # and rotate it based on wind direction to form a predictive risk cone.
+    # Base radius is ~500m. Wind speed multiplier scales it forward.
     risk_query = """
         SELECT 
             f.event_id,
@@ -104,17 +109,37 @@ def main():
             f.latitude as fire_lat,
             f.longitude as fire_lon,
             f.temperature,
+            f.wind_speed_mph,
+            f.wind_direction_deg,
+            f.humidity_percent,
             b.building_type,
             b.building_name,
             ST_AsText(b.geometry) as building_geom
         FROM fire_events_stream f
         JOIN buildings b
         ON ST_Intersects(
-            ST_Buffer(ST_Point(CAST(f.longitude AS Decimal(24,20)), CAST(f.latitude AS Decimal(24,20))), {buffer}), 
+            -- Translate the ellipse so the fire origin is at the tail, then rotate it
+            ST_Rotate(
+                ST_Translate(
+                    ST_Scale(
+                        ST_Buffer(ST_Point(CAST(f.longitude AS Decimal(24,20)), CAST(f.latitude AS Decimal(24,20))), {base_buffer}),
+                        1.0, -- X scale (width stays base buffer)
+                        -- Y scale (length extends based on wind speed. 1 mph = +10% length)
+                        1.0 + (COALESCE(f.wind_speed_mph, 0.0) * 0.1)
+                    ),
+                    0.0,
+                    -- Shift origin so the point is at the base of the cone, not the center
+                    ({base_buffer} * (1.0 + (COALESCE(f.wind_speed_mph, 0.0) * 0.1))) / 2.0
+                ),
+                -- Rotate based on wind direction. Radians = Degrees * PI / 180.
+                -- Subtracted from 180/360 depending on orientation to point 'downwind'
+                RADIANS(COALESCE(f.wind_direction_deg, 0.0)),
+                ST_Point(CAST(f.longitude AS Decimal(24,20)), CAST(f.latitude AS Decimal(24,20)))
+            ), 
             b.geometry
         )
         WHERE f.is_fire = true
-    """.format(buffer=RISK_BUFFER_DEGREES)
+    """.format(base_buffer=BASE_RISK_DEGREES)
 
     risk_assets_stream = spark.sql(risk_query)
 
