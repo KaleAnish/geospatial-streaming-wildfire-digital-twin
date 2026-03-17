@@ -40,6 +40,29 @@ def build_static_layers(visible_gdf: gpd.GeoDataFrame) -> list:
     ]
 
 
+def build_h3_overview_layer(h3_summary_df) -> list:
+    """
+    Build a lightweight H3 hexagon layer for state-wide overview.
+    Uses ~206 H3 res4 hexagons instead of 79k building polygons.
+    """
+    if h3_summary_df.empty:
+        return []
+
+    return [
+        pdk.Layer(
+            "H3HexagonLayer",
+            h3_summary_df,
+            get_hexagon="h3_index",
+            get_fill_color="[255, (1 - building_count / 1500) * 255, 0, 180]",
+            get_elevation="building_count",
+            elevation_scale=50,
+            extruded=True,
+            pickable=True,
+            opacity=0.7,
+        )
+    ]
+
+
 def _compute_wind_cone(alert: dict) -> dict:
     """
     Compute a triangular wind cone polygon for a single alert.

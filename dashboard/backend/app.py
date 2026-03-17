@@ -2,9 +2,10 @@
 Wildfire Twin — Streamlit Dashboard
 
 Architecture:
-  - Building data loaded from GeoParquet (cached)
+  - Building data loaded from H3-partitioned GeoParquet (cached)
   - Alerts loaded from DuckDB live store (populated by alert_sink consumer)
   - NO direct Kafka consumption — fully decoupled
+  - Map uses PyDeck WebGL with native GPU frustum culling (like Google Maps)
 """
 
 import os
@@ -24,12 +25,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from dashboard.backend.data_loader import (
     check_data_exists,
     load_and_classify_buildings,
+    load_h3_summary,
     load_alerts,
     load_alert_count,
     filter_to_viewport,
 )
 from dashboard.backend.map_layers import (
     build_static_layers,
+    build_h3_overview_layer,
     build_dynamic_layers,
     apply_alert_highlighting,
 )
@@ -112,7 +115,7 @@ with st.sidebar:
         st.session_state.data_source = "all"
 
     selected_city = st.selectbox(
-        "🗺️ Teleport Viewport", list(CITIES.keys()), index=0
+        "🗺️ Teleport Viewport", list(CITIES.keys()), index=1  # Default to Riverside
     )
 
     st.divider()
@@ -149,11 +152,11 @@ with st.sidebar:
     st.divider()
 
     # Live Alert Panel — auto-refreshes from DuckDB every 5 seconds
+    # This is ONLY text, so it never causes the map to blink!
     @st.fragment(run_every=5)
     def live_alert_panel():
         st.header("⚡ Live Risk Alerts")
 
-        # Read source from session state for filtering
         source = st.session_state.get('data_source', 'all')
         alerts = load_alerts(limit=100, source=source)
         alert_count = len(alerts)
@@ -161,8 +164,7 @@ with st.sidebar:
         if alerts:
             st.metric("🔥 Active Alerts", alert_count)
 
-            # Weather context from most recent alert
-            latest = alerts[0]  # Already sorted DESC by event_time
+            latest = alerts[0]
             st.info(
                 f"**Live Weather Context:**\n"
                 f"🌡️ {latest.get('temperature', '--')}°F\n"
@@ -171,7 +173,6 @@ with st.sidebar:
                 f"{latest.get('wind_direction_deg', '--')}°"
             )
 
-            # Show the most recent 5 alerts
             for alert in alerts[:5]:
                 st.warning(
                     f"**RISK**: {alert.get('building_name', 'Unnamed Facility')}\n"
@@ -183,81 +184,84 @@ with st.sidebar:
 
     live_alert_panel()
 
-# --- Load Buildings (Static) ---
-center_lat, center_lon = CITIES[selected_city]
+# =============================================
+# MAIN MAP — NO AUTO-REFRESH (no more blinking!)
+# =============================================
+# PyDeck uses WebGL GPU frustum culling — it sends all data once
+# but only RENDERS what's visible on screen, exactly like Google Maps.
+# The base map tiles are handled by deck.gl's tile loader.
 
-if "California" in selected_city:
+center_lat, center_lon = CITIES[selected_city]
+is_state_view = "California" in selected_city
+
+if is_state_view:
     zoom_level = 6
+    with st.spinner("Loading H3 state-wide heatmap (206 hexagons)..."):
+        h3_summary = load_h3_summary()
+    base_visible_gdf = None
 else:
     zoom_level = 13
+    h3_summary = None
+    with st.spinner("Loading H3 city partition..."):
+        base_visible_gdf = load_and_classify_buildings(center_lat, center_lon, margin_deg=0.1)
 
-with st.spinner("Processing state-wide assets..."):
-    full_gdf = load_and_classify_buildings()
+# Load alerts ONCE per page load (no 5-second rebuild!)
+source = st.session_state.get('data_source', 'all')
+alerts = load_alerts(limit=500, source=source)
 
-# Filter to viewport unless viewing whole state
-if "California" in selected_city:
-    base_visible_gdf = full_gdf
+# Build layers based on zoom mode
+if is_state_view:
+    all_layers = build_h3_overview_layer(h3_summary) + build_dynamic_layers(alerts)
+    tooltip = {"text": "H3 Cell: {h3_index}\nBuildings: {building_count}"}
 else:
-    base_visible_gdf = filter_to_viewport(full_gdf, center_lat, center_lon)
-
-# --- Auto-Refreshing Map Fragment ---
-@st.fragment(run_every=5)
-def render_live_map():
-    # Load fresh alerts
-    source = st.session_state.get('data_source', 'all')
-    alerts = load_alerts(limit=500, source=source)
-    
-    # Copy base GDF so we don't mutate the static cached layer, then highlight
     visible_gdf = apply_alert_highlighting(base_visible_gdf.copy(), alerts)
-    
-    # Build Map Layers
-    static_layers = build_static_layers(visible_gdf)
-    dynamic_layers = build_dynamic_layers(alerts)
-    all_layers = static_layers + dynamic_layers
-    
-    # Render Map
-    view_state = pdk.ViewState(
-        latitude=center_lat,
-        longitude=center_lon,
-        zoom=zoom_level,
-        pitch=45,
-    )
-    
-    deck = pdk.Deck(
-        views=[pdk.View(type="MapView", controller=True)],  # Unlocked pan & zoom!
-        layers=all_layers,
-        initial_view_state=view_state,
-        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-        tooltip={
-            "text": "Facility: {building_name}\nCategory: {category}\nRaw Type: {building_type}"
-        },
-    )
-    
-    # Streamlit warning fix: use_container_width is deprecated
-    st.pydeck_chart(deck, height=600)
+    all_layers = build_static_layers(visible_gdf) + build_dynamic_layers(alerts)
+    tooltip = {"text": "Facility: {building_name}\nCategory: {category}\nRaw Type: {building_type}"}
 
-render_live_map()
+# Manual refresh — reruns the page to fetch fresh alerts without blinking during normal use
+if st.button("🔄 Refresh Map Alerts", use_container_width=True):
+    st.rerun()
 
-# --- Footer Stats Fragment ---
+# Render the PyDeck Map — this runs ONCE, no fragment, no blink!
+view_state = pdk.ViewState(
+    latitude=center_lat,
+    longitude=center_lon,
+    zoom=zoom_level,
+    pitch=45,
+)
+
+deck = pdk.Deck(
+    layers=all_layers,
+    initial_view_state=view_state,
+    map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    tooltip=tooltip,
+)
+
+st.pydeck_chart(deck, height=600)
+
+# --- Footer Stats ---
 st.divider()
 
-@st.fragment(run_every=5)
-def render_footer():
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.subheader("Category Distribution")
-        if not base_visible_gdf.empty:
-            st.dataframe(base_visible_gdf['category'].value_counts())
-    with col2:
-        st.subheader("Legend")
-        st.markdown("🔴 **Medical** (Hospitals)")
-        st.markdown("🟡 **Education** (Schools)")
-        st.markdown("🟠 **Emergency** (Fire, Police)")
-        st.markdown("⭐ **ALERT** (Inside Wind Cone)")
-    with col3:
-        st.subheader("System Health")
-        st.metric("Total Master Buildings", f"{len(full_gdf):,}")
-        source = st.session_state.get('data_source', 'all')
-        st.metric("Live Active Alerts", load_alert_count(source=source))
-
-render_footer()
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.subheader("Category Distribution")
+    if base_visible_gdf is not None and not base_visible_gdf.empty:
+        st.dataframe(base_visible_gdf['category'].value_counts())
+    elif h3_summary is not None:
+        st.metric("H3 Hexagons Loaded", len(h3_summary))
+with col2:
+    st.subheader("Legend")
+    st.markdown("🔴 **Medical** (Hospitals)")
+    st.markdown("🟡 **Education** (Schools)")
+    st.markdown("🟠 **Emergency** (Fire, Police)")
+    st.markdown("⭐ **ALERT** (Inside Wind Cone)")
+    if is_state_view:
+        st.markdown("🟧 **H3 Heatmap** (Building Density)")
+with col3:
+    st.subheader("System Health")
+    if base_visible_gdf is not None:
+        st.metric("Viewport Buildings", f"{len(base_visible_gdf):,}")
+    elif h3_summary is not None:
+        total = h3_summary['building_count'].sum()
+        st.metric("State-wide Buildings", f"{total:,}")
+    st.metric("Live Active Alerts", load_alert_count(source=source))
