@@ -1,295 +1,229 @@
+"""
+Wildfire Twin — Streamlit Dashboard
+
+Architecture:
+  - Building data loaded from GeoParquet (cached)
+  - Alerts loaded from DuckDB live store (populated by alert_sink consumer)
+  - NO direct Kafka consumption — fully decoupled
+"""
+
 import os
-import streamlit as st
-import pandas as pd
-import geopandas as gpd
-import pydeck as pdk
+import sys
 import json
-import numpy as np
 import uuid
-from shapely import wkt
+from datetime import datetime, timezone
+import streamlit as st
+import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
+from kafka import KafkaProducer
 
-from kafka import KafkaConsumer
+# Add project root to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from dashboard.backend.data_loader import (
+    check_data_exists,
+    load_and_classify_buildings,
+    load_alerts,
+    load_alert_count,
+    filter_to_viewport,
+)
+from dashboard.backend.map_layers import (
+    build_static_layers,
+    build_dynamic_layers,
+    apply_alert_highlighting,
+)
+from scripts.fetch_weather_data import fetch_live_weather
+
+# --- Kafka Simulation Logic ---
+def trigger_simulation(lat: float, lon: float, temp: float):
+    bootstrap = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
+    topic = os.getenv("KAFKA_TOPIC_INPUT", "fire_events")
+    producer = KafkaProducer(
+        bootstrap_servers=[bootstrap],
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        acks="all"
+    )
+    
+    live_weather = fetch_live_weather(lat, lon)
+    if not live_weather:
+        live_weather = {
+            "temperature_f": temp,
+            "humidity_percent": 30.0,
+            "wind_speed_mph": 0.0,
+            "wind_direction_deg": 0.0
+        }
+        
+    event = {
+        "event_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "event_id": str(uuid.uuid4()),
+        "sensor_id": "dashboard_sim",
+        "latitude": lat,
+        "longitude": lon,
+        "temperature": float(live_weather["temperature_f"]),
+        "is_fire": True,
+        "wind_speed_mph": float(live_weather["wind_speed_mph"]),
+        "wind_direction_deg": float(live_weather["wind_direction_deg"]),
+        "humidity_percent": float(live_weather["humidity_percent"])
+    }
+    
+    producer.send(topic, value=event)
+    producer.flush()
+    producer.close()
+
+# --- Page Config ---
 st.set_page_config(layout="wide", page_title="California Essential Buildings")
-
 st.title("🗺️ California Essential Infrastructure")
 st.caption("State-wide fusion of 11.5M Microsoft structural polygons and 79k OpenStreetMap POIs.")
 
-# --- Kafka & Data Configuration ---
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
-ALERT_TOPIC = "at_risk_assets"
-data_path = os.path.join(os.getcwd(), "data", "california_essential_buildings.parquet")
+# --- Data Validation ---
+check_data_exists()
 
-if not os.path.exists(data_path):
-    st.error("California master dataset not found. Please ensure the state-wide spatial join has completed.")
-    st.stop()
-
-# --- Session State for Live Alerts ---
-if 'alerts' not in st.session_state:
-    st.session_state.alerts = []
-
-# City Coordinate Registry for Fixed Viewports
+# --- City Coordinate Registry ---
 CITIES = {
     "Riverside": (33.9533, -117.3961),
     "Los Angeles": (34.0522, -118.2437),
     "San Francisco": (37.7749, -122.4194),
     "San Diego": (32.7157, -117.1611),
     "Sacramento": (38.5816, -121.4944),
-    "Irvine/UCR": (33.9533, -117.3961)
+    "Irvine/UCR": (33.9533, -117.3961),
 }
 
+# --- Sidebar: Navigation & Live Alerts ---
 with st.sidebar:
     st.header("Navigation")
-    selected_city = st.selectbox("Teleport to City (Fixed Viewport)", list(CITIES.keys()), index=0)
-    
+    selected_city = st.selectbox(
+        "Teleport to City (Fixed Viewport)", list(CITIES.keys()), index=0
+    )
+
     st.divider()
-    st.header("⚡ Live Risk Alerts")
+
+    st.header("🎮 Simulation Mode (What-If)")
+    st.caption("1. Click the map below to choose an ignition point.")
     
-    if st.button("🔄 Sync Live Alerts"):
-        try:
-            # Use a unique group ID to ensure we see all messages in the topic
-            session_group = f"streamlit-{uuid.uuid4()}"
-            consumer = KafkaConsumer(
-                ALERT_TOPIC,
-                bootstrap_servers=[KAFKA_BOOTSTRAP],
-                auto_offset_reset='earliest',
-                enable_auto_commit=False,
-                group_id=session_group,
-                value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-                consumer_timeout_ms=5000 # 5 seconds to catch everything
-            )
-            
-            new_alerts = []
-            for message in consumer:
-                new_alerts.append(message.value)
-            
-            if new_alerts:
-                # Deduplicate or just add fresh ones if they aren't already there
-                existing_ids = {a.get('event_id') + a.get('building_name', '') for a in st.session_state.alerts}
-                added_count = 0
-                for alert in new_alerts:
-                    alert_key = alert.get('event_id') + alert.get('building_name', '')
-                    if alert_key not in existing_ids:
-                        st.session_state.alerts.append(alert)
-                        added_count += 1
-                
-                if added_count > 0:
-                    st.toast(f"Found {added_count} new risk matches!", icon="🔥")
-                else:
-                    st.info("No new unique alerts found.")
-            else:
-                st.info("No alerts found in the fire stream.")
-            
-            consumer.close()
-        except Exception as e:
-            st.error(f"Kafka connection failed: {e}")
+    # Folium Mini-Map for coordinate selection
+    m = folium.Map(location=[CITIES[selected_city][0], CITIES[selected_city][1]], zoom_start=10)
+    m.add_child(folium.LatLngPopup())
+    map_data = st_folium(m, height=250, use_container_width=True, returned_objects=["last_clicked"])
+    
+    sim_lat = CITIES[selected_city][0]
+    sim_lon = CITIES[selected_city][1]
+    
+    if map_data and map_data.get("last_clicked"):
+        sim_lat = map_data["last_clicked"]["lat"]
+        sim_lon = map_data["last_clicked"]["lng"]
 
-    if st.session_state.alerts:
-        if st.button("Clear Alerts"):
-            st.session_state.alerts = []
-            st.rerun()
-            
-        # Display weather context from the most recent alert
-        latest = st.session_state.alerts[-1]
-        st.info(f"**Live Weather Incident Context:**\n"
-               f"🌡️ {latest.get('temperature', '--')}°F\n"
-               f"💧 {latest.get('humidity_percent', '--')}%\n"
-               f"💨 {latest.get('wind_speed_mph', '--')} mph @ {latest.get('wind_direction_deg', '--')}°")
+    with st.form("sim_form"):
+        st.write(f"**Target Coordinates:** `{sim_lat:.5f}`, `{sim_lon:.5f}`")
+        st.caption("2. Set fallback conditions and simulate.")
+        sim_temp = st.slider("Fallback Temp (°F)", min_value=50.0, max_value=120.0, value=85.0)
         
-        for alert in st.session_state.alerts[-5:]: # Show last 5
-            st.warning(f"**RISK**: {alert.get('building_name', 'Unnamed Facility')}\nType: {alert.get('building_type')}")
-    else:
-        st.info("No active fire threats detected.")
+        if st.form_submit_button("🔥 Simulate Fire Here"):
+            with st.spinner("Publishing simulation to Kafka..."):
+                trigger_simulation(sim_lat, sim_lon, sim_temp)
+            st.success("Simulation triggered! Wait a few seconds for map update.")
 
+    st.divider()
+
+    # Live Alert Panel — auto-refreshes from DuckDB every 5 seconds
+    @st.fragment(run_every=5)
+    def live_alert_panel():
+        st.header("⚡ Live Risk Alerts")
+
+        alerts = load_alerts(limit=100)
+        alert_count = len(alerts)
+
+        if alerts:
+            st.metric("🔥 Active Alerts", alert_count)
+
+            # Weather context from most recent alert
+            latest = alerts[0]  # Already sorted DESC by event_time
+            st.info(
+                f"**Live Weather Context:**\n"
+                f"🌡️ {latest.get('temperature', '--')}°F\n"
+                f"💧 {latest.get('humidity_percent', '--')}%\n"
+                f"💨 {latest.get('wind_speed_mph', '--')} mph @ "
+                f"{latest.get('wind_direction_deg', '--')}°"
+            )
+
+            # Show the most recent 5 alerts
+            for alert in alerts[:5]:
+                st.warning(
+                    f"**RISK**: {alert.get('building_name', 'Unnamed Facility')}\n"
+                    f"Type: {alert.get('building_type')}"
+                )
+        else:
+            st.info("No active fire threats detected.")
+            st.caption("Alerts auto-refresh every 5 seconds from the live store.")
+
+    live_alert_panel()
+
+# --- Load Buildings (Static) ---
 center_lat, center_lon = CITIES[selected_city]
 zoom_level = 14
-
-@st.cache_data
-def load_and_classify_buildings():
-    try:
-        gdf = gpd.read_parquet(data_path)
-    except Exception as e:
-        st.error(f"Error reading dataset: {e}")
-        return gpd.GeoDataFrame()
-        
-    if gdf.empty:
-        return gdf
-
-    # Semantic Mapping Logic
-    def categorize(raw_type):
-        raw_type = str(raw_type).title()
-        medical = ['Hospital', 'Clinic', 'Doctors', 'Pharmacy', 'Ambulance Station', 'Nursing Home', 'Animal Hospital', 'Dentist', 'Veterinary']
-        education = ['School', 'College', 'University', 'Prep School', 'Music School', 'Language School', 'Trade School', 'Kindergarten', 'Day Care', 'Childcare']
-        emergency = ['Fire Station', 'Police', 'Emergency Response', 'Ambulance Station']
-        
-        if any(m in raw_type for m in medical): return "Medical", [220, 20, 60, 200]    # Red
-        if any(e in raw_type for e in education): return "Education", [255, 215, 0, 200] # Yellow/Gold
-        if any(em in raw_type for em in emergency): return "Emergency", [255, 140, 0, 200] # Orange
-        return "Civic/Other", [112, 128, 144, 200] # Slate Gray
-
-    gdf['category_data'] = gdf['building_type'].apply(categorize)
-    gdf['category'] = gdf['category_data'].apply(lambda x: x[0])
-    gdf['color'] = gdf['category_data'].apply(lambda x: x[1])
-    
-    return gdf
 
 with st.spinner("Processing state-wide assets..."):
     full_gdf = load_and_classify_buildings()
 
-# Filter to viewport
-margin = 0.05
-visible_gdf = full_gdf[
-    (full_gdf.geometry.centroid.y > center_lat - margin) &
-    (full_gdf.geometry.centroid.y < center_lat + margin) &
-    (full_gdf.geometry.centroid.x > center_lon - margin) &
-    (full_gdf.geometry.centroid.x < center_lon + margin)
-].copy()
+# Filter to viewport (Base static geometry)
+base_visible_gdf = filter_to_viewport(full_gdf, center_lat, center_lon)
 
-# Add Alert Highlight if building is in session state
-alert_names = [a.get('building_name') for a in st.session_state.alerts]
-def apply_alert_color(row):
-    if row['building_name'] in alert_names:
-        return [255, 255, 0, 255] # Bright Yellow for alerts
-    return row['color']
-
-if not visible_gdf.empty:
-    visible_gdf['color'] = visible_gdf.apply(apply_alert_color, axis=1)
-
-# Prepare Fire Points and Wind Cones from alerts
-# We recalculate the cone here for PyDeck rendering using turf.js equivalent logic or Polygon generation.
-# For PyDeck, we can render the polygon directly if we construct it, or use a Scatterplot for origin 
-# and a PolygonLayer for the cone. Let's create an approximate polygon for the cone.
-import math
-fire_geneses = []
-wind_cones = []
-
-BASE_RADIUS_METERS = 500
-
-for a in st.session_state.alerts:
-    # Origin
-    fire_geneses.append({"lat": a['fire_lat'], "lon": a['fire_lon'], "name": "Fire Origin"})
+# --- Auto-Refreshing Map Fragment ---
+@st.fragment(run_every=5)
+def render_live_map():
+    # Load fresh alerts
+    alerts = load_alerts(limit=500)
     
-    # Calculate Cone Polygon
-    lat, lon = a['fire_lat'], a['fire_lon']
-    wind_mph = float(a.get('wind_speed_mph', 0))
-    wind_deg = float(a.get('wind_direction_deg', 0))
+    # Copy base GDF so we don't mutate the static cached layer, then highlight
+    visible_gdf = apply_alert_highlighting(base_visible_gdf.copy(), alerts)
     
-    # Length of cone depends on wind speed. 1 mph = 10% longer.
-    length_meters = BASE_RADIUS_METERS * (1.0 + (wind_mph * 0.1))
-    width_meters = BASE_RADIUS_METERS  # Keep width roughly the same as base diameter
+    # Build Map Layers
+    static_layers = build_static_layers(visible_gdf)
+    dynamic_layers = build_dynamic_layers(alerts)
+    all_layers = static_layers + dynamic_layers
     
-    # Earth radius in meters
-    R = 6378137
-    
-    # Point 1: Origin (Tail of the cone)
-    # Point 2 & 3: The wide part of the cone pushed forward by wind
-    
-    # Convert wind direction to Radians. 
-    # Meteorological wind direction: 0=North, 90=East. This is where wind acts FROM.
-    # To find where fire goes TO, we add 180 degrees.
-    travel_deg = (wind_deg + 180) % 360
-    travel_rad = math.radians(travel_deg)
-    
-    # Calculate the tip/center of the far end of the cone
-    dest_lat = lat + (length_meters / R) * (180 / math.pi)
-    dest_lon = lon + (length_meters / R) * (180 / math.pi) / math.cos(lat * math.pi/180)
-    
-    # For a simple visual representation in PyDeck without complex Shapely buffering on the fly:
-    # We will use an arc/polygon. A simpler PyDeck approach is an ArcLayer or an oriented IconLayer, 
-    # but a manual triangle/cone is best.
-    
-    angle_offset = math.radians(30) # 30 degree spread on each side of the central wind vector
-    
-    left_rad = travel_rad - angle_offset
-    right_rad = travel_rad + angle_offset
-    
-    left_lat = lat + (length_meters / R) * math.cos(left_rad) * (180 / math.pi)
-    left_lon = lon + (length_meters / R) * math.sin(left_rad) * (180 / math.pi) / math.cos(lat * math.pi/180)
-    
-    right_lat = lat + (length_meters / R) * math.cos(right_rad) * (180 / math.pi)
-    right_lon = lon + (length_meters / R) * math.sin(right_rad) * (180 / math.pi) / math.cos(lat * math.pi/180)
-
-    wind_cones.append({
-        "polygon": [[lon, lat], [right_lon, right_lat], [left_lon, left_lat], [lon, lat]],
-        "color": [255, 140, 0, 120] # Translucent Dark Orange for the cone
-    })
-
-fire_df = pd.DataFrame(fire_geneses)
-cone_df = pd.DataFrame(wind_cones)
-
-# PyDeck
-view_state = pdk.ViewState(
-    latitude=center_lat,
-    longitude=center_lon,
-    zoom=zoom_level,
-    pitch=45
-)
-
-layers = [
-    pdk.Layer(
-        "GeoJsonLayer",
-        visible_gdf,
-        opacity=0.8,
-        stroked=True,
-        filled=True,
-        extruded=True,
-        get_elevation=30,
-        get_fill_color="color",
-        get_line_color=[255, 255, 255, 150],
-        pickable=True
+    # Render Map
+    view_state = pdk.ViewState(
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=zoom_level,
+        pitch=45,
     )
-]
-
-if not cone_df.empty:
-    layers.append(
-        pdk.Layer(
-            "PolygonLayer",
-            cone_df,
-            get_polygon="polygon",
-            get_fill_color="color",
-            get_line_color=[255, 69, 0, 255],
-            filled=True,
-            stroked=True,
-            line_width_min_pixels=2
-        )
+    
+    deck = pdk.Deck(
+        views=[pdk.View(type="MapView", controller=False)],
+        layers=all_layers,
+        initial_view_state=view_state,
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+        tooltip={
+            "text": "Facility: {building_name}\nCategory: {category}\nRaw Type: {building_type}"
+        },
     )
+    
+    # Streamlit warning fix: use_container_width is deprecated
+    st.pydeck_chart(deck, height=600)
 
-if not fire_df.empty:
-    layers.append(
-        pdk.Layer(
-            "ScatterplotLayer",
-            fire_df,
-            get_position=["lon", "lat"],
-            get_color=[255, 0, 0, 255], # Solid Bright Red for origin
-            get_radius=150, # Small tight radius for just the origin point
-            pickable=True
-        )
-    )
+render_live_map()
 
-deck = pdk.Deck(
-    views=[pdk.View(type="MapView", controller=False)], 
-    layers=layers,
-    initial_view_state=view_state,
-    map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-    tooltip={"text": "Facility: {building_name}\nCategory: {category}\nRaw Type: {building_type}"}
-)
-
-st.pydeck_chart(deck, height=600, use_container_width=True)
-
+# --- Footer Stats Fragment ---
 st.divider()
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.subheader("Category Distribution")
-    if not visible_gdf.empty:
-        st.dataframe(visible_gdf['category'].value_counts(), use_container_width=True)
-with col2:
-    st.subheader("Legend")
-    st.markdown("🔴 **Medical** (Hospitals)")
-    st.markdown("🟡 **Education** (Schools)")
-    st.markdown("🟠 **Emergency** (Fire, Police)")
-    st.markdown("⭐ **ALERt** (Inside Wind Cone)")
-with col3:
-    st.subheader("System Health")
-    st.metric("Total Master Buildings", f"{len(full_gdf):,}")
-    st.metric("Live Active Alerts", len(st.session_state.alerts))
+@st.fragment(run_every=5)
+def render_footer():
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.subheader("Category Distribution")
+        if not base_visible_gdf.empty:
+            st.dataframe(base_visible_gdf['category'].value_counts())
+    with col2:
+        st.subheader("Legend")
+        st.markdown("🔴 **Medical** (Hospitals)")
+        st.markdown("🟡 **Education** (Schools)")
+        st.markdown("🟠 **Emergency** (Fire, Police)")
+        st.markdown("⭐ **ALERT** (Inside Wind Cone)")
+    with col3:
+        st.subheader("System Health")
+        st.metric("Total Master Buildings", f"{len(full_gdf):,}")
+        st.metric("Live Active Alerts", load_alert_count())
+
+render_footer()

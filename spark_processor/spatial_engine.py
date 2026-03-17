@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import typing
+import shutil
 
 # Patch for Python 3.13+ compatibility with PySpark 3.4.1
 # PySpark tries to import from typing.io, which was removed in Python 3.13
@@ -26,11 +27,38 @@ INPUT_TOPIC = os.getenv("KAFKA_TOPIC_INPUT", "fire_events")
 OUTPUT_TOPIC = os.getenv("KAFKA_TOPIC_OUTPUT", "at_risk_assets")
 # Point to the new CA Master Dataset
 BUILDING_DATA_PATH = os.path.join(os.getcwd(), "data", "california_essential_buildings.parquet")
-CHECKPOINT_DIR = os.path.join(os.getcwd(), "data", "spark_checkpoints", "fire_twin")
+import uuid
+CHECKPOINT_DIR = os.path.join(os.getcwd(), "data", "spark_checkpoints", f"fire_twin_{uuid.uuid4().hex}")
+
 
 # Fix PySpark python executable detection on Windows
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+
+# --- Windows Environment Self-Healing ---
+# Spark on Windows requires HADOOP_HOME and winutils.exe. 
+# If not set, we try to point it to the project's infra/hadoop directory.
+if os.name == 'nt' and not os.getenv("HADOOP_HOME"):
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fallback_hadoop_home = os.path.join(project_root, "infra", "hadoop")
+    if os.path.exists(fallback_hadoop_home):
+        print(f"[ENV] Auto-configuring HADOOP_HOME: {fallback_hadoop_home}")
+        os.environ["HADOOP_HOME"] = fallback_hadoop_home
+        # Also ensure hadoop/bin is in the system PATH for winutils.exe discovery
+        hadoop_bin = os.path.join(fallback_hadoop_home, "bin")
+        if hadoop_bin not in os.environ["PATH"]:
+            os.environ["PATH"] = hadoop_bin + os.pathsep + os.environ["PATH"]
+
+def clear_checkpoints():
+    """Wipe the Spark checkpoint directory to prevent locks/corruption on Windows."""
+    if os.path.exists(CHECKPOINT_DIR):
+        print(f"[ENV] Clearing corrupted/locked Spark checkpoints at: {CHECKPOINT_DIR}")
+        try:
+            # Use a retry loop or just force delete
+            shutil.rmtree(CHECKPOINT_DIR, ignore_errors=True)
+            os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+        except Exception as e:
+            print(f"[WARN] Could not fully clear checkpoints: {e}")
 
 # Base Risk buffer in degrees (~500m base)
 BASE_RISK_DEGREES = float(os.getenv("RISK_BUFFER_METERS", "500")) / 111000.0 
@@ -51,6 +79,11 @@ def create_spark_session():
     return sedona
 
 def main():
+    # Force clear checkpoints on startup to prevent Windows FileAlreadyExistsException
+    # Can be disabled by setting FORCE_CLEAR_CHECKPOINTS=false
+    if os.getenv("FORCE_CLEAR_CHECKPOINTS", "true").lower() == "true":
+        clear_checkpoints()
+
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
     
@@ -118,24 +151,7 @@ def main():
         FROM fire_events_stream f
         JOIN buildings b
         ON ST_Intersects(
-            -- Translate the ellipse so the fire origin is at the tail, then rotate it
-            ST_Rotate(
-                ST_Translate(
-                    ST_Scale(
-                        ST_Buffer(ST_Point(CAST(f.longitude AS Decimal(24,20)), CAST(f.latitude AS Decimal(24,20))), {base_buffer}),
-                        1.0, -- X scale (width stays base buffer)
-                        -- Y scale (length extends based on wind speed. 1 mph = +10% length)
-                        1.0 + (COALESCE(f.wind_speed_mph, 0.0) * 0.1)
-                    ),
-                    0.0,
-                    -- Shift origin so the point is at the base of the cone, not the center
-                    ({base_buffer} * (1.0 + (COALESCE(f.wind_speed_mph, 0.0) * 0.1))) / 2.0
-                ),
-                -- Rotate based on wind direction. Radians = Degrees * PI / 180.
-                -- Subtracted from 180/360 depending on orientation to point 'downwind'
-                RADIANS(COALESCE(f.wind_direction_deg, 0.0)),
-                ST_Point(CAST(f.longitude AS Decimal(24,20)), CAST(f.latitude AS Decimal(24,20)))
-            ), 
+            ST_Buffer(ST_Point(CAST(f.longitude AS Decimal(24,20)), CAST(f.latitude AS Decimal(24,20))), {base_buffer}), 
             b.geometry
         )
         WHERE f.is_fire = true

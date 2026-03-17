@@ -15,7 +15,8 @@ CITIES = {
     "San Francisco": (37.7749, -122.4194),
     "San Diego": (32.7157, -117.1611),
     "Sacramento": (38.5816, -121.4944),
-    "UCR": (33.9737, -117.3281) # Precision UCR for user's specific check
+    "UCR": (33.9737, -117.3281), # Precision UCR for user's specific check
+    "Riverside_School": (33.9825, -117.3569) # Known building exact coordinate
 }
 
 def utc_now_iso() -> str:
@@ -33,6 +34,7 @@ def main():
     parser.add_argument("--city", choices=list(CITIES.keys()), default="Riverside")
     parser.add_argument("--count", type=int, default=1, help="Number of fire events to send")
     parser.add_argument("--temp", type=float, default=85.0, help="Temperature in Celsius")
+    parser.add_argument("--exact", action="store_true", help="Do not add random jitter to coordinates")
     args = parser.parse_args()
 
     bootstrap = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
@@ -58,9 +60,12 @@ def main():
         }
 
     for i in range(args.count):
-        # Add tiny jitter to simulate different spots in the city
-        event_lat = lat + random.uniform(-0.005, 0.005)
-        event_lon = lon + random.uniform(-0.005, 0.005)
+        if args.exact:
+            event_lat, event_lon = lat, lon
+        else:
+            # Add tiny jitter to simulate different spots in the city
+            event_lat = lat + random.uniform(-0.005, 0.005)
+            event_lon = lon + random.uniform(-0.005, 0.005)
         
         event = {
             "event_time": utc_now_iso(),
