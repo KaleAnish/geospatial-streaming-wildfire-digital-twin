@@ -150,3 +150,15 @@ dmypy.json
 
 # Local Hadoop/Winutils binaries
 infra/hadoop/
+
+# Wildfire-Twin Datasets
+data/
+*.parquet
+*.geojson
+*.csv
+
+# Spark Logs and Checkpoints
+spark_engine_log.txt
+spark_engine_log.txt.bak
+data/spark_checkpoints/
+checkpoint/

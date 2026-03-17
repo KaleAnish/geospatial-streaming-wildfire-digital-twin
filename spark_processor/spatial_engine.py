@@ -24,15 +24,16 @@ from sedona.spark import SedonaContext
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 INPUT_TOPIC = os.getenv("KAFKA_TOPIC_INPUT", "fire_events")
 OUTPUT_TOPIC = os.getenv("KAFKA_TOPIC_OUTPUT", "at_risk_assets")
-BUILDING_DATA_PATH = os.getenv("BUILDING_DATA_PATH", "data/riverside_buildings.parquet")
-CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/tmp/spark_checkpoints/fire_twin")
+# Point to the new CA Master Dataset
+BUILDING_DATA_PATH = os.path.join(os.getcwd(), "data", "california_essential_buildings.parquet")
+CHECKPOINT_DIR = os.path.join(os.getcwd(), "data", "spark_checkpoints", "fire_twin")
 
 # Fix PySpark python executable detection on Windows
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 # Risk buffer in degrees (~500m)
-RISK_BUFFER_DEGREES = 500.0 / 111000.0 
+RISK_BUFFER_DEGREES = float(os.getenv("RISK_BUFFER_METERS", "500")) / 111000.0 
 
 def create_spark_session():
     # Configure Spark for Sedona and Kafka
@@ -43,6 +44,7 @@ def create_spark_session():
                 "org.datasyslab:geotools-wrapper:1.7.0-28.5,"
                 "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1") \
         .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true") \
+        .config("spark.driver.memory", "4g") \
         .getOrCreate()
     
     sedona = SedonaContext.create(config)
@@ -52,21 +54,18 @@ def main():
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
     
-    # 1. Load static building data
-    print("\n[STEP 1] Loading Static Building Assets...")
-    buildings_path = os.path.join(os.getcwd(), "data", "riverside_buildings.parquet")
+    # 1. Load static building data (California Master)
+    print("\n[STEP 1] Loading California Master Building Assets...")
     
-    if os.path.exists(buildings_path):
-        print(f"Loading CA buildings from: {buildings_path}")
-        buildings_df = spark.read.format("geoparquet").load(buildings_path)
-        buildings_df.createOrReplaceTempView("buildings")
-        print(f"✅ Loaded {buildings_df.count()} buildings into 'buildings' view.")
+    if os.path.exists(BUILDING_DATA_PATH):
+        print(f"Loading CA buildings from: {BUILDING_DATA_PATH}")
+        # Apply ST_GeomFromWKB to ensure it's a Sedona Geometry object
+        spark.read.parquet(BUILDING_DATA_PATH).createOrReplaceTempView("raw_buildings")
+        spark.sql("CREATE OR REPLACE TEMP VIEW buildings AS SELECT building_type, building_name, ST_GeomFromWKB(geometry) as geometry FROM raw_buildings")
+        print(f"[Done] Loaded California essential buildings into 'buildings' view.")
     else:
-        print(f"⚠️ Warning: {buildings_path} not found. Using fallback dummy data.")
-        dummy_data = [("dummy_id", "POLYGON ((-117.4 33.9, -117.3 33.9, -117.3 34.0, -117.4 34.0, -117.4 33.9))")]
-        dummy_df = spark.createDataFrame(dummy_data, ["id", "wkt"])
-        dummy_df.createOrReplaceTempView("raw_buildings")
-        spark.sql("CREATE OR REPLACE TEMP VIEW buildings AS SELECT id, ST_GeomFromText(wkt) as geometry FROM raw_buildings")
+        print(f"Critical Error: {BUILDING_DATA_PATH} not found.")
+        sys.exit(1)
 
     # 2. Define schema for incoming Kafka events
     event_schema = StructType([
@@ -80,6 +79,7 @@ def main():
     ])
 
     # 3. Read streaming data from Kafka
+    print(f"[STEP 2] Connecting to Kafka Stream: {INPUT_TOPIC}")
     raw_stream = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP) \
@@ -96,15 +96,16 @@ def main():
     parsed_stream.createOrReplaceTempView("fire_events_stream")
 
     # 5. Spatial Join Processing
-    # We only process events where is_fire == true
-    # We create a geometry point, buffer it, and join with buildings
+    # We create a 500m buffer around fire events and find intersections with buildings.
     risk_query = """
         SELECT 
             f.event_id,
             f.event_time,
-            f.sensor_id,
+            f.latitude as fire_lat,
+            f.longitude as fire_lon,
             f.temperature,
-            b.building_id,
+            b.building_type,
+            b.building_name,
             ST_AsText(b.geometry) as building_geom
         FROM fire_events_stream f
         JOIN buildings b
@@ -118,7 +119,7 @@ def main():
     risk_assets_stream = spark.sql(risk_query)
 
     # 6. Write results to Output Kafka topic
-    # Serialize the output struct back to JSON
+    print(f"[STEP 3] Starting Asset-Risk Stream -> {OUTPUT_TOPIC}")
     kafka_output = risk_assets_stream \
         .select(to_json(struct("*")).alias("value"))
 
@@ -130,7 +131,6 @@ def main():
         .outputMode("append") \
         .start()
 
-    print(f"Started Spark Structured Streaming pipeline. Writing to topic: {OUTPUT_TOPIC}")
     query.awaitTermination()
 
 if __name__ == "__main__":
