@@ -7,6 +7,11 @@ This project is being implemented by Prince Savsaviya, Viswanadh Rahul Challa, A
 
 ---
 
+## Demo
+
+![Simulation UI](simulation-ui.png)
+![Visualization](risk-visualization.png)
+
 ## What’s implemented right now (Phase 0)
 
 ✅ Dockerized Kafka stack (local dev)  
