@@ -9,8 +9,8 @@ This project is being implemented by Prince Savsaviya, Viswanadh Rahul Challa, A
 
 ## Demo
 
-![Simulation UI](simulation-ui.png)
-![Visualization](risk-visualization.png)
+![Simulation UI](simulation.jpeg)
+![Visualization](infra-risk-visual.jpeg)
 
 ## What’s implemented right now (Phase 0)
 
